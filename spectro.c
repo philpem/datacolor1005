@@ -8,6 +8,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
 #include <assert.h>
 
@@ -35,6 +36,13 @@ typedef enum {
 	CM3_CAL_WHITE					= 0,		///< Calibrate from white tile
 	CM3_CAL_BLACK					= 1			///< Calibrate from black tile (not used)
 } CM3_CAL_TYPE;
+
+/////////////////////////////////////////////////////////////////////////////////////
+
+typedef struct {
+	int profile_size, num_bands, output_mode;
+	int profile_size_valid, num_bands_valid, output_mode_valid;
+} CM3_STATE;
 
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -187,23 +195,41 @@ int cm3_get_num_bands(libusb_device_handle *devh, unsigned int *nbands)
 	return 0;
 }
 
-int cm3_get_output_mode(libusb_device_handle *devh, unsigned char *output_mode)
+int cm3_get_output_mode(libusb_device_handle *devh, CM3_STATE *state, unsigned char *output_mode)
 {
 	unsigned int psize, nbands;
 	int err;
 
-	if ((err = cm3_get_profile_size(devh, &psize)) != 0)
-		return err;
+	// Get the profile size if we don't already have it
+	if (!state->profile_size_valid) {
+		if ((err = cm3_get_profile_size(devh, &psize)) != 0) {
+			return err;
+		}
+		state->profile_size = psize;
+		state->profile_size_valid = true;
+	}
 
-	if ((err = cm3_get_num_bands(devh, &nbands)) != 0)
-		return err;
+	// Do the same for number of bands
+	if (!state->num_bands_valid) {
+		if ((err = cm3_get_num_bands(devh, &nbands)) != 0) {
+			return err;
+		}
+		state->num_bands = nbands;
+		state->num_bands_valid = true;
+	}
 
+	// Profile size > 64 means the output mode is stored in memory, else it isn't
 	if (psize > 64) {
-		err = cm3_read_memory(devh, 0x7FFFB + psize - (8*nbands), 1, output_mode);
-		if (err) return err;
+		err = cm3_read_memory(devh, 0x7FFFB + state->profile_size - (8 * state->num_bands), 1, output_mode);
+		if (err) {
+			return err;
+		}
 	} else {
 		*output_mode = 0;
 	}
+
+	state->output_mode = *output_mode;
+	state->output_mode_valid = true;
 
 	return 0;
 }
@@ -259,8 +285,11 @@ int main(void)
  * Measure
  */
 
+	CM3_STATE state;
+	memset(&state, 0, sizeof(state));
+
 	unsigned char outmode;
-	err = cm3_get_output_mode(devh, &outmode);
+	err = cm3_get_output_mode(devh, &state, &outmode);
 	printf("CM3 Output Mode => %d\n", outmode);
 
 	// output modes --
