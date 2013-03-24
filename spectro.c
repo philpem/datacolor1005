@@ -30,6 +30,12 @@ typedef enum {
 	CM3_CMD_WRITE_MEMORY			= 0x17		///< Write to CM3 memory
 } CM3_COMMAND;
 
+/// Calibration modes
+typedef enum {
+	CM3_CAL_WHITE					= 0,		///< Calibrate from white tile
+	CM3_CAL_BLACK					= 1			///< Calibrate from black tile (not used)
+} CM3_CAL_TYPE;
+
 /////////////////////////////////////////////////////////////////////////////////////
 
 /**
@@ -40,7 +46,7 @@ typedef enum {
  * @param	len		Payload length (or zero if no payload)
  * @return	Status code, or -1 on error
  */
-int cm3_cmd(libusb_device_handle *devh, unsigned char cmd, unsigned char *payload, int *len, unsigned char *response)
+int cm3_cmd(libusb_device_handle *devh, CM3_COMMAND cmd, unsigned char *payload, int *len, unsigned char *response)
 {
 	unsigned char buf[256];
 	static unsigned char cm3_command_tag = 0;
@@ -102,6 +108,105 @@ int cm3_cmd(libusb_device_handle *devh, unsigned char cmd, unsigned char *payloa
 	return status;
 }
 
+/**
+ * Soft reset
+ */
+int cm3_soft_reset(libusb_device_handle *devh)
+{
+	int len = 0;
+
+	return cm3_cmd(devh, CM3_CMD_SOFT_RESET, NULL, &len, NULL);
+}
+
+/**
+ * Read firmware version
+ */
+int cm3_get_fw_ver(libusb_device_handle *devh, unsigned int *ver)
+{
+	int len = 0;
+	int err;
+	unsigned char buf[32];
+
+	err = cm3_cmd(devh, CM3_CMD_GET_FIRMWARE_VERSION, NULL, &len, buf);
+	if (err == 0) {
+		*ver = 0;
+		for (int i=0; i<4; i++) {
+			*ver = (*ver << 8) + buf[i];
+		}
+	}
+
+	return err;
+}
+
+/**
+ * Read CM3 memory.
+ */
+int cm3_read_memory(libusb_device_handle *devh, unsigned int addr, int len, unsigned char *rxbuf)
+{
+	unsigned char txbuf[6];
+	int rlen;
+
+	assert(len > 0);
+
+	// Prepare read command packet
+	txbuf[0] = (addr >> 16) & 0xff;
+	txbuf[1] = (addr >>  8) & 0xff;
+	txbuf[2] = (addr)       & 0xff;
+	txbuf[3] = (len  >>  8) & 0xff;
+	txbuf[4] = (len)        & 0xff;
+
+	rlen = 5;
+	return cm3_cmd(devh, CM3_CMD_READ_MEMORY, txbuf, &rlen, rxbuf);
+}
+
+int cm3_get_profile_size(libusb_device_handle *devh, unsigned int *psize)
+{
+	unsigned char buf[2];
+	int err;
+
+	if ((err = cm3_read_memory(devh, 0x8000B, 2, buf)) != 0) {
+		return err;
+	}
+
+	*psize = (buf[0] << 8) | buf[1];
+
+	return 0;
+}
+
+int cm3_get_num_bands(libusb_device_handle *devh, unsigned int *nbands)
+{
+	unsigned char buf[2];
+	int err;
+
+	if ((err = cm3_read_memory(devh, 0x80018, 1, buf)) != 0) {
+		return err;
+	}
+
+	*nbands = buf[0];
+
+	return 0;
+}
+
+int cm3_get_output_mode(libusb_device_handle *devh, unsigned char *output_mode)
+{
+	unsigned int psize, nbands;
+	int err;
+
+	if ((err = cm3_get_profile_size(devh, &psize)) != 0)
+		return err;
+
+	if ((err = cm3_get_num_bands(devh, &nbands)) != 0)
+		return err;
+
+	if (psize > 64) {
+		err = cm3_read_memory(devh, 0x7FFFB + psize - (8*nbands), 1, output_mode);
+		if (err) return err;
+	} else {
+		*output_mode = 0;
+	}
+
+	return 0;
+}
 
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -140,24 +245,25 @@ int main(void)
 	}
 
 	// device now open
-	int len;
-	len = 0;
-	err = cm3_cmd(devh, CM3_CMD_SOFT_RESET, NULL, &len, NULL);
-	printf("CM3 Reset: %d\n", err);
+	printf("CM3 Reset: %d\n", cm3_soft_reset(devh));
 
-	unsigned char buf[32];
-	len = 0;
-	err = cm3_cmd(devh, CM3_CMD_GET_FIRMWARE_VERSION, NULL, &len, buf);
-	printf("CM3 Get FW Version: %d", err, len);
-	if (err == 0) {
-		unsigned long foo = 0;
-		for (int i=0; i<4; i++) foo = (foo << 8) + buf[i];
-		printf(" = 0x%08X\n", foo);
-	} else {
-		printf("\n");
-	}
+	unsigned int fwv;
+	err = cm3_get_fw_ver(devh, &fwv);
+	printf("CM3 Get FW Version: %d ==> 0x%08X\n", err, fwv);
 
-	// meas types --
+/***
+ * Initialisation:
+ *
+ * Get output mode
+ * Get measurement table
+ * Measure
+ */
+
+	unsigned char outmode;
+	err = cm3_get_output_mode(devh, &outmode);
+	printf("CM3 Output Mode => %d\n", outmode);
+
+	// output modes --
 	// 		0x10 = LAB D50
 	// 		0x11 = LAB D65
 	// 		0x20 = XYZ D50
