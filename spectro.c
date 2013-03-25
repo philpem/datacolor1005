@@ -40,8 +40,8 @@ typedef enum {
 /////////////////////////////////////////////////////////////////////////////////////
 
 typedef struct {
-	int profile_size, num_bands, output_mode;
-	int profile_size_valid, num_bands_valid, output_mode_valid;
+	int profile_size, num_bands, output_mode, meas_table_len;
+	int profile_size_valid, num_bands_valid, output_mode_valid, meas_table_len_valid;
 } CM3_STATE;
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -234,6 +234,135 @@ int cm3_get_output_mode(libusb_device_handle *devh, CM3_STATE *state, unsigned c
 	return 0;
 }
 
+int cm3_get_measurement_table(libusb_device_handle *devh, CM3_STATE *state, unsigned char *table)
+{
+	unsigned int nbands;
+	unsigned char mtl;
+	int err;
+
+	// Need number of bands to calculate memory offset
+	if (!state->num_bands_valid) {
+		if ((err = cm3_get_num_bands(devh, &nbands)) != 0) {
+			return err;
+		}
+		state->num_bands = nbands;
+		state->num_bands_valid = true;
+	} else {
+		nbands = state->num_bands;
+	}
+
+	// Read measurement table length
+	if ((err = cm3_read_memory(devh, 0x8001A + (2 * state->num_bands), 1, &mtl)) != 0) {
+		return err;
+	}
+
+	// Set valid flag, store measurement table length
+	state->meas_table_len_valid = true;
+	state->meas_table_len = mtl;
+
+	// Read table if we need it
+	if (table) {
+		*table = mtl;
+		if ((err = cm3_read_memory(devh, 0x8001B + (2 * state->num_bands), state->meas_table_len, &mtl)) != 0) {
+			return err;
+		}
+	}
+
+	return 0;
+}
+
+typedef struct {
+	char mode;
+	float x,y,z;
+	float l,a,b;
+} CM3_MEASUREMENT;
+
+int cm3_measure(libusb_device_handle *devh, CM3_STATE *state, CM3_MEASUREMENT *meas)
+{
+	unsigned char output_mode;
+	unsigned char rxbuf[32];
+	int err, len;
+
+	// Send "Measure" command
+	len = 0;
+	if ((err = cm3_cmd(devh, CM3_CMD_MEASURE, NULL, &len, rxbuf)) != 0) {
+		return err;
+	}
+
+	// Get output mode and measurement table length
+	if (!state->output_mode_valid) {
+		if ((err = cm3_get_output_mode(devh, state, &output_mode)) != 0) {
+			return err;
+		}
+	}
+
+	if (!state->meas_table_len_valid) {
+		if ((err = cm3_get_measurement_table(devh, state, NULL)) != 0) {
+			return err;
+		}
+	}
+
+	printf("Meastable Len %d\n", state->meas_table_len);
+	printf("Read Len %d\n", len);
+
+	if (len == 12) {
+		// Length of 12 -- Lab colour
+		long lab_buf[3];
+		for (int i=0; i<3; i++) {
+			lab_buf[i] =
+				(rxbuf[(4*i)] << 24) +
+				(rxbuf[(4*i)+1] << 16) +
+				(rxbuf[(4*i)+2] << 8) +
+				(rxbuf[(4*i)+3]);
+		}
+
+		// Load output buffer
+		if (lab_buf[0] >= 0x7FE89) {
+			meas->l = ((float)lab_buf[0] / 65535.0) - 16.0;
+		} else {
+			meas->l = ((float)lab_buf[0] / 65535.0);
+		}
+		meas->a = (float)lab_buf[1] / 65535.0;
+		meas->b = (float)lab_buf[2] / 65535.0;
+	} else if (len == 6) {
+		// Length of 6 -- XYZ colour
+		int xyz_buf[3];
+		for (int i=0; i<3; i++) {
+			xyz_buf[i] =
+				(rxbuf[(2*i)] << 8) +
+				(rxbuf[(2*i)+1]);
+		}
+
+		// Load output buffer
+		if (output_mode == 0x20) {
+			// D50 XYZ
+			meas->x = xyz_buf[0] * 96.420998 / 65535.0;
+			meas->y = xyz_buf[1] * 100.0 / 65535.0;
+			meas->z = xyz_buf[2] * 82.524002 / 65535.0;
+		} else if (output_mode == 0x21) {
+			// D65 XYZ
+			meas->x = xyz_buf[0] * 94.808998 / 65535.0;
+			meas->y = xyz_buf[1] * 100.0 / 65535.0;
+			meas->z = xyz_buf[2] * 107.307 / 65535.0;
+		} else {
+			// error
+			return -1001;
+		}
+	} else {
+		return -1000;
+	}
+
+	return 0;
+}
+
+// TODO
+// TODO
+// Get Unit ID
+// Calibrate
+// Poll Button (interrupt EP 1)
+// TODO
+// TODO
+
 /////////////////////////////////////////////////////////////////////////////////////
 
 int main(void)
@@ -281,8 +410,12 @@ int main(void)
  * Initialisation:
  *
  * Get output mode
- * Get measurement table
+ * Get measurement table len
+ *
  * Measure
+ * Calibrate
+ *
+ * Measure [...]
  */
 
 	CM3_STATE state;
@@ -291,6 +424,29 @@ int main(void)
 	unsigned char outmode;
 	err = cm3_get_output_mode(devh, &state, &outmode);
 	printf("CM3 Output Mode => %d\n", outmode);
+
+	CM3_MEASUREMENT meas;
+	err = cm3_measure(devh, &state, &meas);
+	printf("CM3 Measure => %d\n", err);
+	printf("Output mode: ");
+	switch (state.output_mode) {
+		case 0x10: printf("LAB\n"); break;
+		case 0x20: printf("XYZ D50\n"); break;
+		case 0x21: printf("D65\n"); break;
+	}
+
+	switch (state.output_mode & 0xF0) {
+		case 0x10:
+			printf("\tL = %f\n", meas.l);
+			printf("\ta = %f\n", meas.a);
+			printf("\tb = %f\n", meas.b);
+			break;
+		case 0x20:
+			printf("\tX = %f\n", meas.x);
+			printf("\tY = %f\n", meas.y);
+			printf("\tZ = %f\n", meas.z);
+			break;
+	}
 
 	// output modes --
 	// 		0x10 = LAB D50
