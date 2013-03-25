@@ -26,7 +26,7 @@ typedef enum {
 	CM3_CMD_GET_FIRMWARE_VERSION	= 0x02,		///< Get firmware version (returns 4 bytes)
 	CM3_CMD_SOFT_RESET				= 0x04,		///< Soft reset (returns nothing)
 	CM3_CMD_MEASURE					= 0x0A,		///< Measure
-	CM3_CMD_CALIBRATE_WHITE			= 0x12,		///< Calibrate white level
+	CM3_CMD_CALIBRATE				= 0x12,		///< Calibrate
 	CM3_CMD_READ_MEMORY				= 0x16,		///< Read from CM3 memory
 	CM3_CMD_WRITE_MEMORY			= 0x17		///< Write to CM3 memory
 } CM3_COMMAND;
@@ -446,6 +446,35 @@ int main(void)
 			printf("\tY = %f\n", meas.y);
 			printf("\tZ = %f\n", meas.z);
 			break;
+	}
+
+	unsigned char calmode = CM3_CAL_WHITE;	// calibrate from white tile
+	int x = 1;
+	err = cm3_cmd(devh, CM3_CMD_CALIBRATE, &calmode, &x, NULL);
+	printf("CM3 Calibrate => %d\n", err);
+
+	for (int z=0; z<3; z++) {
+		err = cm3_measure(devh, &state, &meas);
+		printf("CM3 Measure => %d\n", err);
+		printf("Output mode: ");
+		switch (state.output_mode) {
+			case 0x10: printf("LAB\n"); break;
+			case 0x20: printf("XYZ D50\n"); break;
+			case 0x21: printf("XYZ D65\n"); break;
+		}
+
+		switch (state.output_mode & 0xF0) {
+			case 0x10:
+				printf("\tL = %f\n", meas.l);
+				printf("\ta = %f\n", meas.a);
+				printf("\tb = %f\n", meas.b);
+				break;
+			case 0x20:
+				printf("\tX = %f\n", meas.x);
+				printf("\tY = %f\n", meas.y);
+				printf("\tZ = %f\n", meas.z);
+				break;
+		}
 	}
 
 	// output modes --
