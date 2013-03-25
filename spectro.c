@@ -432,7 +432,7 @@ int main(void)
 	switch (state.output_mode) {
 		case 0x10: printf("LAB\n"); break;
 		case 0x20: printf("XYZ D50\n"); break;
-		case 0x21: printf("D65\n"); break;
+		case 0x21: printf("XYZ D65\n"); break;
 	}
 
 	switch (state.output_mode & 0xF0) {
